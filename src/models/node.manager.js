@@ -420,7 +420,7 @@ export class NodeManager {
      *
      * @param {Pipeline|string} pipelineOrId
      * @param {PluginInstance} instance
-     * @return {Promise<NodeManager>}
+     * @return {NodeManager}
      */
     attachPluginInstance(pipelineOrId, instance) {
         let pipeline;
