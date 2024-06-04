@@ -1,6 +1,6 @@
 {
   "name": "@naeural/js-web-client",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "This is the official Naeural JavaScript Web Browser compatible network client.",
   "main": "src/index.js",
   "scripts": {

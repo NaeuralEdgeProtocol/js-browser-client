@@ -1,12 +1,10 @@
 import asn1 from 'asn1.js';
 import stringify from 'json-stable-stringify';
-import {
-    base64ToUrlSafeBase64,
-    urlSafeBase64ToBase64
-} from './helper.functions.js';
-import { ec as EC } from 'elliptic';
-import { BN } from 'bn.js';
-import { Buffer } from 'buffer';
+import {base64ToUrlSafeBase64, urlSafeBase64ToBase64} from './helper.functions.js';
+import {ec as EC} from 'elliptic';
+import {BN} from 'bn.js';
+import {Buffer} from 'buffer';
+import {words} from './utils/words';
 
 const EE_SIGN = 'EE_SIGN';
 const EE_SENDER = 'EE_SENDER';
@@ -15,18 +13,22 @@ const ADDR_PREFIX = '0xai_';
 const ALLOWED_PREFIXES = ['0xai_', 'aixp_'];
 const NON_DATA_FIELDS = [EE_SIGN, EE_SENDER, EE_HASH];
 
-const SPKI = asn1.define('SPKI', function () {
+const ECPrivateKey = asn1.define('ECPrivateKey', function () {
     this.seq().obj(
-        this.key('algorithm').seq().obj(this.key('id').objid(), this.key('namedCurve').objid()),
-        this.key('publicKey').bitstr(),
+        this.key('version').int(),
+        this.key('privateKey').octstr(),
+        this.key('publicKey').explicit(1).optional().bitstr()
     );
 });
 
-const PKCS8 = asn1.define('PKCS8PrivateKeyInfo', function () {
+const PKCS8 = asn1.define('PKCS8', function () {
     this.seq().obj(
         this.key('version').int(),
-        this.key('algorithm').seq().obj(this.key('id').objid(), this.key('params').optional().any()),
-        this.octstr(this.seq(this.key('flag').int(), this.key('content').octstr())),
+        this.key('privateKeyAlgorithm').seq().obj(
+            this.key('algorithm').objid(),
+            this.key('parameters').objid()
+        ),
+        this.key('privateKey').octstr(),
     );
 });
 
@@ -36,7 +38,7 @@ const PKCS8 = asn1.define('PKCS8PrivateKeyInfo', function () {
  * This is the NaeuralEdgeProtocol Network Blockchain engine. Its purpose is to offer any integrator common features like
  * signature checking, message validation or key pair generation.
  */
-class NaeuralBC {
+export class NaeuralBC {
     keyPair;
 
     /**
@@ -89,6 +91,62 @@ class NaeuralBC {
         };
     }
 
+    static generateRandomWords(numWords = 24) {
+        const randomWords = [];
+
+        let i = 0;
+        while (i < numWords) {
+            const randomIndex = Math.floor(Math.random() * words.length);
+            if (!randomWords.includes(words[randomIndex])) {
+                randomWords.push(words[randomIndex]);
+                i++;
+            }
+        }
+
+        return randomWords;
+    }
+
+    static async generateIdentityFromSecretWords(words) {
+        const asString = words.join(';');
+        const encoder = new TextEncoder();
+        const encodedInput = encoder.encode(asString);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', encodedInput);
+        const hashArray = new Uint8Array(hashBuffer);
+        const hashHex = Array.from(hashArray).map(b => b.toString(16).padStart(2, '0')).join('');
+
+        const hashInt = BigInt(`0x${hashHex}`);
+        const orderN = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
+        const validSeed = hashInt % orderN;
+
+        return this.ec.keyFromPrivate(validSeed.toString(16));
+    }
+
+    static convertEllipticPrivateKeyToPKCS8DER(privateKeyHex) {
+        const privateKeyBuffer = Buffer.from(privateKeyHex, 'hex');
+
+        const ecPrivateKey = ECPrivateKey.encode({
+            version: 1,
+            privateKey: privateKeyBuffer,
+        }, 'der');
+
+        return PKCS8.encode({
+            version: 0,
+            privateKeyAlgorithm: {
+                algorithm: [1, 2, 840, 10045, 2, 1],
+                parameters: [1, 3, 132, 0, 10]
+            },
+            privateKey: ecPrivateKey
+        }, 'der');
+    }
+
+    static convertECKeyPairToPEM(keyPair) {
+        const privateKeyHex = keyPair.getPrivate('hex');
+        const publicKeyHex = keyPair.getPublic('hex').slice(2);
+        const pkcs8DER = NaeuralBC.convertEllipticPrivateKeyToPKCS8DER(privateKeyHex, publicKeyHex);
+
+        return `-----BEGIN PRIVATE KEY-----\n${pkcs8DER.toString('base64').match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----\n`;
+    }
+
     /**
      * Loads a PEM formatted private key into an elliptic key pair
      */
@@ -97,9 +155,15 @@ class NaeuralBC {
         const pemFooter = "-----END PRIVATE KEY-----";
         const base64 = pem.replace(/\n|\r/g, '').replace(pemHeader, '').replace(pemFooter, '').trim();
         const definition = PKCS8.decode(Buffer.from(base64, 'base64'), 'der');
-        const privateKeyData = definition.content;
+        const keyData = ECPrivateKey.decode(definition.privateKey, 'der');
 
-        return this.ec.keyFromPrivate(privateKeyData, 'hex');
+        return this.ec.keyFromPrivate(keyData.privateKey, 'hex');
+    }
+
+    static async pemFromSecretWords(words) {
+        const identity = await NaeuralBC.generateIdentityFromSecretWords(words);
+
+        return NaeuralBC.convertECKeyPairToPEM(identity);
     }
 
     /**
