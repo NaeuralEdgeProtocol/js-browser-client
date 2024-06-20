@@ -1,6 +1,6 @@
 import mqtt from 'mqtt';
 import EventEmitter2 from 'eventemitter2';
-import { concatMap, filter, fromEvent, map } from 'rxjs';
+import { concatMap, filter, fromEvent, map, tap } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 import {
     HEARTBEATS_STREAM,
@@ -11,7 +11,7 @@ import {
     NODE_COMMAND_UPDATE_CONFIG,
     NODE_COMMAND_UPDATE_PIPELINE_INSTANCE,
     NOTIFICATIONS_STREAM,
-    PAYLOADS_STREAM, REST_CUSTOM_EXEC_SIGNATURE
+    PAYLOADS_STREAM, REST_CUSTOM_EXEC_SIGNATURE, ZxAI_SUPERVISOR_PAYLOAD
 } from './constants';
 import NaeuralBC from './web.blockchain';
 import { processHeartbeat } from './processors/heartbeat.processor';
@@ -194,8 +194,8 @@ export class NaeuralWebClient extends EventEmitter2 {
                 filter((message) => this._messageIsSigned(message)),
                 map((message) => this._toJSON(message)),
                 filter((message) => this._messageIsFromEdgeNode(message)),
+                tap((message) => this._processSupervisorMessage(message)),
                 filter((message) => this._messageFromControlledFleet(message)),
-                // todo: supervisor messages
                 filter((message) => this._messageHasKnownFormat(message)),
                 concatMap((message) => this._decodeToInternalFormat(message)),
             );
@@ -473,6 +473,12 @@ export class NaeuralWebClient extends EventEmitter2 {
         return true;
     }
 
+    /**
+     *
+     * @param path
+     * @return {{pipeline: *, metadata: *, instance: *}}
+     * @private
+     */
     _makeContext(path) {
         const context = {
             pipeline: null,
@@ -628,6 +634,33 @@ export class NaeuralWebClient extends EventEmitter2 {
         const node = message.EE_PAYLOAD_PATH[0];
 
         return this.bootOptions.fleet.includes(node);
+    }
+
+    /**
+     *
+     * @param message
+     * @private
+     */
+    _processSupervisorMessage(message) {
+        if (message.EE_PAYLOAD_PATH[1]?.toLowerCase() === 'admin_pipeline') {
+            const duplicate = { ...message };
+            if (this._messageHasKnownFormat(duplicate)) {
+                this._decodeToInternalFormat(duplicate).then((decoded) => {
+                    if (decoded.EE_PAYLOAD_PATH[2]?.toLowerCase() === 'net_mon_01') {
+
+                    }
+
+                    const context = this._makeContext(decoded.EE_PAYLOAD_PATH);
+
+                    const data = { ...decoded.DATA };
+                    delete decoded.DATA;
+                    context.metadata = decoded;
+                    context.metadata['SESSION_ID'] = data['SESSION_ID'];
+
+                    this.emit(ZxAI_SUPERVISOR_PAYLOAD, null, data, context);
+                });
+            }
+        }
     }
 
     /**
